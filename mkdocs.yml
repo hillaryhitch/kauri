@@ -1,0 +1,88 @@
+site_name: Kazuri Documentation
+site_description: Documentation for Kazuri - Your AI-powered development assistant
+site_author: Hillary Murefu
+repo_url: https://github.com/hillaryhitch/kazuri
+repo_name: hillaryhitch/kazuri
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting-started/installation.md
+    - AWS Setup: getting-started/aws-setup.md
+    - Quick Start: getting-started/quick-start.md
+  - User Guide:
+    - Basic Usage: user-guide/basic-usage.md
+    - Available Tools: user-guide/tools.md
+    - Examples: user-guide/examples.md
+  - Advanced:
+    - Configuration: advanced/configuration.md
+    - Session Management: advanced/sessions.md
+    - Browser Integration: advanced/browser.md
+  - API Reference:
+    - CLI: api/cli.md
+    - Tools: api/tools.md
+    - Session: api/session.md
+  - Development:
+    - Contributing: development/contributing.md
+    - Testing: development/testing.md
+    - Release Process: development/releasing.md
+
+markdown_extensions:
+  - admonition
+  - codehilite
+  - footnotes
+  - meta
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          rendering:
+            show_source: true
+            show_root_heading: true
+            show_category_heading: true
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/hillaryhitch/kazuri
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/kazuri/
+
+copyright: Copyright &copy; 2024 Hillary Murefu

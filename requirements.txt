@@ -1,0 +1,36 @@
+# Core dependencies
+typer>=0.15.0
+rich>=13.9.0
+boto3>=1.35.0
+python-dotenv>=1.0.0
+fastapi>=0.104.1
+uvicorn>=0.24.0
+pydantic>=2.4.2
+
+# AWS
+boto3>=1.35.0
+botocore>=1.35.0
+
+# CLI and UI
+typer>=0.15.0
+rich>=13.9.0
+click>=8.1.7
+shellingham>=1.5.4
+
+# Web and API
+fastapi>=0.104.1
+uvicorn>=0.24.0
+httpx>=0.28.0
+python-multipart>=0.0.6
+
+# Development dependencies
+pytest>=7.4.0
+black>=23.7.0
+isort>=5.12.0
+flake8>=6.1.0
+mypy>=1.5.1
+
+# Documentation
+mkdocs>=1.5.0
+mkdocs-material>=9.2.0
+mkdocstrings>=0.22.0
