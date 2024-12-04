@@ -1,0 +1,13 @@
+LICENSE
+README.md
+setup.py
+kazuri/__init__.py
+kazuri/cli.py
+kazuri/session.py
+kazuri/tools.py
+kazuri.egg-info/PKG-INFO
+kazuri.egg-info/SOURCES.txt
+kazuri.egg-info/dependency_links.txt
+kazuri.egg-info/entry_points.txt
+kazuri.egg-info/requires.txt
+kazuri.egg-info/top_level.txt

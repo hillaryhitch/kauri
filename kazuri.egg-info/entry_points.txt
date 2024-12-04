@@ -1,0 +1,2 @@
+[console_scripts]
+kazuri = kazuri.cli:main

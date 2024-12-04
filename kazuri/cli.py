@@ -21,8 +21,36 @@ console = Console()
 tool_manager = ToolManager()
 session = Session()
 
+def get_aws_config() -> Dict[str, str]:
+    """Get AWS configuration from environment variables."""
+    config = {
+        'service_name': 'bedrock-runtime',
+        'region_name': os.getenv('AWS_REGION') or os.getenv('AWS_DEFAULT_REGION'),
+        'aws_access_key_id': os.getenv('AWS_ACCESS_KEY_ID'),
+        'aws_secret_access_key': os.getenv('AWS_SECRET_ACCESS_KEY'),
+        'aws_session_token': os.getenv('AWS_SESSION_TOKEN')  # Optional for temporary credentials
+    }
+    
+    # Remove None values
+    return {k: v for k, v in config.items() if v is not None}
+
 def format_task_for_claude(task: str, environment_details: Optional[str] = None) -> str:
-    system_prompt = """You are Kazuri, a highly skilled software engineer with extensive knowledge in many programming languages, frameworks, design patterns, and best practices. You have access to various tools for file operations, code analysis, and system commands. Your goal is to help users accomplish their development tasks efficiently and effectively.
+    system_prompt = """You are Kazuri, a highly skilled software engineer with extensive knowledge in many programming languages, frameworks, design patterns, and best practices. 
+
+When creating or modifying code:
+1. First write the code and save it to a file
+2. Then test the code thoroughly:
+   - For web components, use browser_action to test in browser
+   - For functions, write and run test cases
+   - For CLI tools, test with sample commands
+3. Always show the test results and ask for confirmation before proceeding
+
+For web development tasks:
+1. Save the code to appropriate files
+2. Launch browser to test the implementation
+3. Perform necessary interactions (clicks, typing, etc.)
+4. Verify the functionality works as expected
+5. Close browser when done
 
 Available tools:
 - execute_command: Execute system commands
@@ -37,21 +65,7 @@ When you need to use a tool, format your response like this:
 <tool_name>tool_name</tool_name>
 <parameter_name>parameter_value</parameter_name>
 
-Always wait for the result of one tool use before proceeding with another.
-
-For web development tasks:
-1. After creating or modifying web files, use browser_action to test the result
-2. Launch the browser with the appropriate URL
-3. Interact with elements if needed (click, type, etc.)
-4. Always close the browser when done testing
-
-Previous Context:
-"""
-    
-    # Add recent conversation context
-    context = session.get_recent_context()
-    if context:
-        system_prompt += f"\n{context}\n"
+Always wait for user confirmation before executing any action."""
     
     prompt = f"{system_prompt}\n\nHuman: {task}"
     
@@ -122,14 +136,14 @@ def execute_tool(tool_use, yes: bool = False) -> Dict[str, Any]:
     tool = tool_use["tool"]
     params = tool_use["parameters"]
     
-    # Show tool details
+    # Show tool details and get confirmation
     console.print("\n[yellow]Tool Request:[/yellow]")
     console.print(f"Tool: {tool}")
     console.print("Parameters:")
     for key, value in params.items():
         console.print(f"  {key}: {value}")
     
-    # Ask for confirmation if not in auto-confirm mode
+    # Always ask for confirmation unless in auto-confirm mode
     if not yes:
         console.print("\n[yellow]Do you want to proceed with this action?[/yellow]")
         if not Confirm.ask("Confirm?"):
@@ -137,74 +151,87 @@ def execute_tool(tool_use, yes: bool = False) -> Dict[str, Any]:
     
     result = None
     
-    if tool == "list_files":
-        result = tool_manager.list_files(
-            params.get("path", "."),
-            params.get("recursive", "false").lower() == "true"
-        )
-    elif tool == "read_file":
-        result = tool_manager.read_file(params["path"])
-    elif tool == "write_file":
+    if tool == "write_file":
         # Additional confirmation for file writes
         if not yes:
             console.print(f"\n[yellow]About to write to file:[/yellow] {params['path']}")
-            if not Confirm.ask("Are you sure?"):
+            console.print("\nContent preview:")
+            console.print(params['content'][:200] + "..." if len(params['content']) > 200 else params['content'])
+            if not Confirm.ask("\nProceed with file write?"):
                 return {"success": False, "error": "File write cancelled by user"}
         result = tool_manager.write_file(params["path"], params["content"])
-    elif tool == "search_files":
-        result = tool_manager.search_files(
-            params["path"],
-            params["regex"],
-            params.get("file_pattern", "*")
-        )
+        
+        # After writing code files, ask if user wants to test
+        if result["success"] and any(params["path"].endswith(ext) for ext in ['.html', '.js', '.jsx', '.ts', '.tsx']):
+            if yes or Confirm.ask("\nWould you like to test this in the browser?"):
+                # Launch browser for testing
+                file_path = os.path.abspath(params["path"])
+                browser_result = execute_tool({
+                    "tool": "browser_action",
+                    "parameters": {
+                        "action": "launch",
+                        "url": f"file://{file_path}"
+                    }
+                }, yes)
+                result["browser_test"] = browser_result
+    
     elif tool == "execute_command":
         # Additional confirmation for command execution
         if not yes:
             console.print(f"\n[yellow]About to execute command:[/yellow] {params['command']}")
-            if not Confirm.ask("Are you sure?"):
+            if not Confirm.ask("\nProceed with command execution?"):
                 return {"success": False, "error": "Command execution cancelled by user"}
         result = tool_manager.execute_command(params["command"])
-    elif tool == "list_code_definitions":
-        result = tool_manager.list_code_definitions(params["path"])
+    
     elif tool == "browser_action":
-        # Handle browser actions
         action = params.get("action")
         if action == "launch":
+            if not yes:
+                console.print(f"\n[yellow]About to launch browser with URL:[/yellow] {params.get('url')}")
+                if not Confirm.ask("\nProceed with browser launch?"):
+                    return {"success": False, "error": "Browser launch cancelled by user"}
             result = {"success": True, "action": "launch", "url": params.get("url")}
-        elif action == "click":
-            result = {"success": True, "action": "click", "coordinate": params.get("coordinate")}
-        elif action == "type":
-            result = {"success": True, "action": "type", "text": params.get("text")}
-        elif action == "scroll_down":
-            result = {"success": True, "action": "scroll_down"}
-        elif action == "scroll_up":
-            result = {"success": True, "action": "scroll_up"}
+        
+        elif action in ["click", "type", "scroll_down", "scroll_up"]:
+            if not yes:
+                console.print(f"\n[yellow]About to perform browser action:[/yellow] {action}")
+                if "coordinate" in params:
+                    console.print(f"At coordinates: {params['coordinate']}")
+                if "text" in params:
+                    console.print(f"With text: {params['text']}")
+                if not Confirm.ask("\nProceed with browser action?"):
+                    return {"success": False, "error": "Browser action cancelled by user"}
+            result = {
+                "success": True,
+                "action": action,
+                "coordinate": params.get("coordinate"),
+                "text": params.get("text")
+            }
+        
         elif action == "close":
+            if not yes:
+                console.print("\n[yellow]About to close browser[/yellow]")
+                if not Confirm.ask("\nProceed with browser close?"):
+                    return {"success": False, "error": "Browser close cancelled by user"}
             result = {"success": True, "action": "close"}
+        
         else:
             result = {"success": False, "error": f"Unknown browser action: {action}"}
-    else:
-        result = {"success": False, "error": f"Unknown tool: {tool}"}
     
-    # Store tool use in session
+    else:
+        # For other tools, use default confirmation
+        if not yes:
+            console.print(f"\n[yellow]About to execute {tool}[/yellow]")
+            if not Confirm.ask("\nProceed?"):
+                return {"success": False, "error": f"{tool} cancelled by user"}
+        result = tool_manager.execute_tool(tool, params)
+    
+    # Store tool use in session if successful
     if result and result.get("success"):
         result["tool"] = tool
         result["parameters"] = params
     
     return result
-
-def get_aws_config():
-    """Get AWS configuration from environment variables."""
-    config = {
-        'service_name': 'bedrock-runtime',
-        'region_name': os.getenv('AWS_REGION') or os.getenv('AWS_DEFAULT_REGION'),
-        'aws_access_key_id': os.getenv('AWS_ACCESS_KEY_ID'),
-        'aws_secret_access_key': os.getenv('AWS_SECRET_ACCESS_KEY'),
-        'aws_session_token': os.getenv('AWS_SESSION_TOKEN')  # Optional for temporary credentials
-    }
-    
-    # Remove None values
-    return {k: v for k, v in config.items() if v is not None}
 
 @app.command()
 def ask(
@@ -264,6 +291,10 @@ def ask(
                         console.print(result["content"])
                     elif "files" in result:
                         console.print("\n".join(result["files"]))
+                    
+                    # If browser test was performed, show results
+                    if "browser_test" in result:
+                        console.print("\n[green]Browser test completed[/green]")
                 else:
                     console.print(f"[red]Tool execution failed: {result.get('error', 'Unknown error')}[/red]")
         

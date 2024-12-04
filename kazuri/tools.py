@@ -4,12 +4,9 @@ import glob
 import subprocess
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from rich.console import Console
-
-console = Console()
 
 class ToolManager:
-    """Manages the execution of various tools available to Python Cline."""
+    """Manages the execution of various tools available to Kazuri."""
     
     def __init__(self):
         self.working_dir = os.getcwd()
@@ -25,6 +22,30 @@ class ToolManager:
             "list_code_definitions",
             "browser_action"
         ]
+    
+    def execute_tool(self, tool: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a tool with given parameters."""
+        if tool == "list_files":
+            return self.list_files(
+                params.get("path", "."),
+                params.get("recursive", "false").lower() == "true"
+            )
+        elif tool == "read_file":
+            return self.read_file(params["path"])
+        elif tool == "write_file":
+            return self.write_file(params["path"], params["content"])
+        elif tool == "search_files":
+            return self.search_files(
+                params["path"],
+                params["regex"],
+                params.get("file_pattern", "*")
+            )
+        elif tool == "execute_command":
+            return self.execute_command(params["command"])
+        elif tool == "list_code_definitions":
+            return self.list_code_definitions(params["path"])
+        else:
+            return {"success": False, "error": f"Unknown tool: {tool}"}
     
     def execute_command(self, command: str, cwd: Optional[str] = None) -> Dict[str, Any]:
         """Execute a system command safely."""
@@ -99,12 +120,14 @@ class ToolManager:
             
             return {
                 "success": True,
-                "error": None
+                "error": None,
+                "path": str(file_path)
             }
         except Exception as e:
             return {
                 "success": False,
-                "error": str(e)
+                "error": str(e),
+                "path": None
             }
     
     def search_files(self, path: str, pattern: str, file_pattern: str = "*") -> Dict[str, Any]:
@@ -129,8 +152,9 @@ class ToolManager:
                                     'match': match.group(),
                                     'context': self._get_context(content, match.start())
                                 })
-                    except Exception as e:
-                        console.print(f"[yellow]Warning: Could not read file {file_path}: {str(e)}[/yellow]")
+                    except Exception:
+                        # Skip files that can't be read
+                        continue
             
             return {
                 "success": True,
