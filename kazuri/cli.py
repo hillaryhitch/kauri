@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 import boto3
 import json
+import re
 from dotenv import load_dotenv
 from .tools import ToolManager
 from .session import Session
@@ -20,6 +21,9 @@ app = typer.Typer(help="Kazuri - Your AI-powered development assistant")
 console = Console()
 tool_manager = ToolManager()
 session = Session()
+
+# Version number
+VERSION = "0.1.2"
 
 def get_aws_config() -> Dict[str, str]:
     """Get AWS configuration from environment variables."""
@@ -34,40 +38,26 @@ def get_aws_config() -> Dict[str, str]:
     # Remove None values
     return {k: v for k, v in config.items() if v is not None}
 
+def load_system_prompt() -> str:
+    """Load the system prompt from file."""
+    prompt_path = Path(__file__).parent / "system_prompt.txt"
+    with open(prompt_path, 'r') as f:
+        return f.read()
+
 def format_task_for_claude(task: str, environment_details: Optional[str] = None) -> str:
-    system_prompt = """You are Kazuri, a highly skilled software engineer with extensive knowledge in many programming languages, frameworks, design patterns, and best practices. 
-
-When creating or modifying code:
-1. First write the code and save it to a file
-2. Then test the code thoroughly:
-   - For web components, use browser_action to test in browser
-   - For functions, write and run test cases
-   - For CLI tools, test with sample commands
-3. Always show the test results and ask for confirmation before proceeding
-
-For web development tasks:
-1. Save the code to appropriate files
-2. Launch browser to test the implementation
-3. Perform necessary interactions (clicks, typing, etc.)
-4. Verify the functionality works as expected
-5. Close browser when done
-
-Available tools:
-- execute_command: Execute system commands
-- read_file: Read file contents
-- write_file: Write content to a file
-- search_files: Search for patterns in files
-- list_files: List files in a directory
-- list_code_definitions: List code definitions in files
-- browser_action: Control a browser for testing web applications
-
-When you need to use a tool, format your response like this:
-<tool_name>tool_name</tool_name>
-<parameter_name>parameter_value</parameter_name>
-
-Always wait for user confirmation before executing any action."""
+    # Load system prompt from file
+    system_prompt = load_system_prompt()
     
-    prompt = f"{system_prompt}\n\nHuman: {task}"
+    # Get recent conversation history
+    recent_context = session.get_recent_context(limit=5)
+    
+    prompt = f"{system_prompt}\n\n"
+    
+    # Add recent conversation history if available
+    if recent_context:
+        prompt += f"Recent Conversation History:\n{recent_context}\n\n"
+    
+    prompt += f"Human: {task}"
     
     if environment_details:
         prompt += f"\n\nEnvironment Details:\n{environment_details}"
@@ -91,147 +81,183 @@ def get_environment_details():
     details.append("\n# VSCode Context")
     details.append("(Add any relevant VSCode context)")
     
+    # Add any active tool uses from recent history
+    recent_tool_uses = session.get_last_tool_uses()
+    if recent_tool_uses:
+        details.append("\n# Recent Tool Uses")
+        for tool_use in recent_tool_uses:
+            details.append(f"- {tool_use.get('tool', 'Unknown')}: {tool_use.get('result', 'No result')}")
+    
     return "\n".join(details)
+
+def extract_code_block(text: str, start_idx: int) -> tuple[str, int]:
+    """Extract a code block from text starting at start_idx."""
+    lines = text[start_idx:].split('\n')
+    code_lines = []
+    end_idx = start_idx
+    
+    for i, line in enumerate(lines):
+        if line.strip() and not line.strip().startswith('</'):
+            code_lines.append(line)
+            end_idx = start_idx + sum(len(l) + 1 for l in lines[:i+1])
+        elif line.strip().startswith('</'):
+            break
+    
+    return '\n'.join(code_lines), end_idx
 
 def process_tool_use(response: str):
     """Process any tool use requests in the response."""
-    if "<tool_name>" not in response:
-        return None
-    
-    # Extract tool name and parameters
-    tool_start = response.find("<tool_name>")
-    tool_end = response.find("</tool_name>")
-    if tool_start == -1 or tool_end == -1:
-        return None
-    
-    tool_name = response[tool_start + 11:tool_end].strip()
-    
-    # Extract parameters
-    params = {}
-    param_start = response.find("<", tool_end)
-    while param_start != -1:
-        param_end = response.find(">", param_start)
-        if param_end == -1:
-            break
+    try:
+        # First check for proper XML format
+        if "<tool_name>" in response:
+            tool_start = response.find("<tool_name>")
+            tool_end = response.find("</tool_name>")
+            if tool_start != -1 and tool_end != -1:
+                tool_name = response[tool_start + 11:tool_end].strip()
+                
+                # Extract parameters
+                params = {}
+                param_start = response.find("<", tool_end)
+                while param_start != -1:
+                    param_end = response.find(">", param_start)
+                    if param_end == -1:
+                        break
+                    
+                    param_name = response[param_start + 1:param_end]
+                    if param_name.startswith('/'):  # Skip closing tags
+                        param_start = response.find("<", param_end)
+                        continue
+                        
+                    content_start = param_end + 1
+                    content_end = response.find(f"</{param_name}>", content_start)
+                    if content_end == -1:
+                        break
+                    
+                    params[param_name] = response[content_start:content_end].strip()
+                    param_start = response.find("<", content_end)
+                
+                return {
+                    "tool": tool_name,
+                    "parameters": params
+                }
         
-        param_name = response[param_start + 1:param_end]
-        content_start = param_end + 1
-        content_end = response.find(f"</{param_name}>", content_start)
-        if content_end == -1:
-            break
-        
-        params[param_name] = response[content_start:content_end].strip()
-        param_start = response.find("<", content_end)
-    
-    return {
-        "tool": tool_name,
-        "parameters": params
-    }
-
-def execute_tool(tool_use, yes: bool = False) -> Dict[str, Any]:
-    """Execute the specified tool with given parameters."""
-    if not tool_use:
-        return {"success": False, "error": "No tool use specified"}
-    
-    tool = tool_use["tool"]
-    params = tool_use["parameters"]
-    
-    # Show tool details and get confirmation
-    console.print("\n[yellow]Tool Request:[/yellow]")
-    console.print(f"Tool: {tool}")
-    console.print("Parameters:")
-    for key, value in params.items():
-        console.print(f"  {key}: {value}")
-    
-    # Always ask for confirmation unless in auto-confirm mode
-    if not yes:
-        console.print("\n[yellow]Do you want to proceed with this action?[/yellow]")
-        if not Confirm.ask("Confirm?"):
-            return {"success": False, "error": "Tool execution cancelled by user"}
-    
-    result = None
-    
-    if tool == "write_file":
-        # Additional confirmation for file writes
-        if not yes:
-            console.print(f"\n[yellow]About to write to file:[/yellow] {params['path']}")
-            console.print("\nContent preview:")
-            console.print(params['content'][:200] + "..." if len(params['content']) > 200 else params['content'])
-            if not Confirm.ask("\nProceed with file write?"):
-                return {"success": False, "error": "File write cancelled by user"}
-        result = tool_manager.write_file(params["path"], params["content"])
-        
-        # After writing code files, ask if user wants to test
-        if result["success"] and any(params["path"].endswith(ext) for ext in ['.html', '.js', '.jsx', '.ts', '.tsx']):
-            if yes or Confirm.ask("\nWould you like to test this in the browser?"):
-                # Launch browser for testing
-                file_path = os.path.abspath(params["path"])
-                browser_result = execute_tool({
-                    "tool": "browser_action",
-                    "parameters": {
-                        "action": "launch",
-                        "url": f"file://{file_path}"
-                    }
-                }, yes)
-                result["browser_test"] = browser_result
-    
-    elif tool == "execute_command":
-        # Additional confirmation for command execution
-        if not yes:
-            console.print(f"\n[yellow]About to execute command:[/yellow] {params['command']}")
-            if not Confirm.ask("\nProceed with command execution?"):
-                return {"success": False, "error": "Command execution cancelled by user"}
-        result = tool_manager.execute_command(params["command"])
-    
-    elif tool == "browser_action":
-        action = params.get("action")
-        if action == "launch":
-            if not yes:
-                console.print(f"\n[yellow]About to launch browser with URL:[/yellow] {params.get('url')}")
-                if not Confirm.ask("\nProceed with browser launch?"):
-                    return {"success": False, "error": "Browser launch cancelled by user"}
-            result = {"success": True, "action": "launch", "url": params.get("url")}
-        
-        elif action in ["click", "type", "scroll_down", "scroll_up"]:
-            if not yes:
-                console.print(f"\n[yellow]About to perform browser action:[/yellow] {action}")
-                if "coordinate" in params:
-                    console.print(f"At coordinates: {params['coordinate']}")
-                if "text" in params:
-                    console.print(f"With text: {params['text']}")
-                if not Confirm.ask("\nProceed with browser action?"):
-                    return {"success": False, "error": "Browser action cancelled by user"}
-            result = {
-                "success": True,
-                "action": action,
-                "coordinate": params.get("coordinate"),
-                "text": params.get("text")
+        # Check for alternative format: <write_file> filename: path
+        write_file_match = re.search(r'<write_file>\s*filename:\s*([^\n]+)', response)
+        if write_file_match:
+            filename = write_file_match.group(1).strip()
+            code_start = write_file_match.end()
+            code, _ = extract_code_block(response, code_start)
+            
+            # Convert to proper format
+            return {
+                "tool": "write_to_file",
+                "parameters": {
+                    "path": filename,
+                    "content": code.strip()
+                }
             }
         
-        elif action == "close":
-            if not yes:
-                console.print("\n[yellow]About to close browser[/yellow]")
-                if not Confirm.ask("\nProceed with browser close?"):
-                    return {"success": False, "error": "Browser close cancelled by user"}
-            result = {"success": True, "action": "close"}
+        return None
+    except Exception as e:
+        console.print(f"[red]Error processing tool use: {str(e)}[/red]")
+        return None
+
+def execute_tool(tool_use: Optional[Dict[str, Any]], yes: bool = False) -> Dict[str, Any]:
+    """Execute the specified tool with given parameters."""
+    try:
+        if not tool_use:
+            return {"success": False, "error": "No tool use specified"}
         
-        else:
-            result = {"success": False, "error": f"Unknown browser action: {action}"}
-    
-    else:
+        if not isinstance(tool_use, dict):
+            return {"success": False, "error": f"Invalid tool use type: {type(tool_use)}"}
+        
+        tool_name = tool_use.get("tool")
+        if not tool_name:
+            return {"success": False, "error": "Tool name not specified"}
+        
+        params = tool_use.get("parameters", {})
+        if not isinstance(params, dict):
+            return {"success": False, "error": f"Invalid parameters type: {type(params)}"}
+        
+        # Show tool details and get confirmation
+        console.print("\n[yellow]Tool Request:[/yellow]")
+        console.print(f"Tool: {tool_name}")
+        console.print("Parameters:")
+        for key, value in params.items():
+            if key == "content":
+                console.print(f"  {key}: <code content follows>")
+                console.print(Panel(value, title="Code Content"))
+            else:
+                console.print(f"  {key}: {value}")
+        
+        # Special handling for code-related tools
+        if tool_name == "write_to_file":
+            console.print("\n[yellow]Would you like to save this code to disk?[/yellow]")
+            if yes or Confirm.ask("Save code?"):
+                result = tool_manager.execute_tool(tool_name, params)
+                if result.get("success"):
+                    console.print(f"[green]Code saved to: {result.get('path')}[/green]")
+                    
+                    # If there's a next step suggested (like running the code)
+                    if result.get("next_step"):
+                        next_step = result["next_step"]
+                        next_tool = next_step.get("tool")
+                        if next_tool == "execute_command":
+                            console.print("\n[yellow]Would you like to run this code in a visible terminal?[/yellow]")
+                            if yes or Confirm.ask("Run code?"):
+                                run_result = tool_manager.execute_command(next_step["command"])
+                                result["run_result"] = run_result
+                        elif next_tool == "browser_action":
+                            console.print("\n[yellow]Would you like to open this in your browser?[/yellow]")
+                            if yes or Confirm.ask("Open in browser?"):
+                                browser_result = tool_manager.browser_action({
+                                    "action": "launch",
+                                    "url": next_step["url"]
+                                })
+                                result["browser_result"] = browser_result
+                
+                return result
+            return {"success": False, "error": "Code save cancelled by user"}
+        
+        # Special handling for browser and terminal actions
+        elif tool_name == "browser_action":
+            console.print("\n[yellow]Would you like to open this in your browser?[/yellow]")
+            if yes or Confirm.ask("Open browser?"):
+                result = tool_manager.browser_action(params)
+                if result.get("success"):
+                    console.print("[green]Browser opened successfully![/green]")
+                return result
+            return {"success": False, "error": "Browser action cancelled by user"}
+        
+        elif tool_name == "execute_command":
+            console.print("\n[yellow]Would you like to run this command in a visible terminal?[/yellow]")
+            if yes or Confirm.ask("Run in terminal?"):
+                result = tool_manager.execute_command(params["command"])
+                if result.get("success"):
+                    console.print("[green]Command executed successfully![/green]")
+                return result
+            return {"success": False, "error": "Command execution cancelled by user"}
+        
         # For other tools, use default confirmation
         if not yes:
-            console.print(f"\n[yellow]About to execute {tool}[/yellow]")
-            if not Confirm.ask("\nProceed?"):
-                return {"success": False, "error": f"{tool} cancelled by user"}
-        result = tool_manager.execute_tool(tool, params)
-    
-    # Store tool use in session if successful
-    if result and result.get("success"):
-        result["tool"] = tool
-        result["parameters"] = params
-    
-    return result
+            console.print("\n[yellow]Do you want to proceed with this action?[/yellow]")
+            if not Confirm.ask("Confirm?"):
+                return {"success": False, "error": "Tool execution cancelled by user"}
+        
+        result = tool_manager.execute_tool(tool_name, params)
+        
+        # Store tool use in session if successful
+        if result and result.get("success"):
+            result["tool"] = tool_name
+            result["parameters"] = params
+        
+        return result
+    except Exception as e:
+        console.print(f"[red]Error executing tool: {str(e)}[/red]")
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 @app.command()
 def ask(
@@ -253,7 +279,7 @@ def ask(
         # Get environment details
         env_details = get_environment_details()
         
-        # Format prompt
+        # Format prompt with conversation history
         formatted_prompt = format_task_for_claude(task, env_details)
         
         # Call Claude through AWS Bedrock
@@ -291,10 +317,6 @@ def ask(
                         console.print(result["content"])
                     elif "files" in result:
                         console.print("\n".join(result["files"]))
-                    
-                    # If browser test was performed, show results
-                    if "browser_test" in result:
-                        console.print("\n[green]Browser test completed[/green]")
                 else:
                     console.print(f"[red]Tool execution failed: {result.get('error', 'Unknown error')}[/red]")
         
@@ -315,6 +337,8 @@ def ask(
             console.print(f"[dim]Available Tools: {tool_manager.list_tools()}[/dim]")
             console.print(f"[dim]AWS Region: {aws_config['region_name']}[/dim]")
             console.print(f"[dim]Session File: {session.current_session}[/dim]")
+            console.print("\n[dim]Recent Context:[/dim]")
+            console.print(session.get_recent_context())
     
     except Exception as e:
         console.print(f"[red]Error: {str(e)}[/red]")
@@ -323,7 +347,7 @@ def ask(
 @app.command()
 def version():
     """Show the version of Kazuri."""
-    console.print("Kazuri version: 0.1.0")
+    console.print(f"Kazuri version: {VERSION}")
 
 def main():
     """Main entry point for the CLI."""

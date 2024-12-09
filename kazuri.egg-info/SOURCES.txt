@@ -11,3 +11,4 @@ kazuri.egg-info/dependency_links.txt
 kazuri.egg-info/entry_points.txt
 kazuri.egg-info/requires.txt
 kazuri.egg-info/top_level.txt
+tests/test_kazuri.py
